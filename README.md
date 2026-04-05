@@ -1,17 +1,18 @@
 # OmniVoice TTS Server
 
-OmniVoice TTS server with Gradio web UI, REST API and Openai compatible endpoint sharing a single model instance. Voice cloning via sample directory, voice design, full generation parameter control. NVIDIA GPU support (Ampere, Ada Lovelace, Blackwell). Docker/Podman-compose ready.
+OmniVoice TTS server with Gradio web UI, REST API, and OpenAI-compatible endpoint sharing a single model instance. Voice cloning via sample directory, voice design, full generation parameter control. NVIDIA GPU support (Ampere, Ada Lovelace, Blackwell). Docker/Podman-compose ready.
 
 Based on [OmniVoice](https://github.com/k2-fsa/OmniVoice) — zero-shot multilingual TTS for 600+ languages. Thanks to the [k2-fsa](https://github.com/k2-fsa) team for open-sourcing the model.
 
 ## Overview
 
-The server loads OmniVoice once and exposes it through two interfaces simultaneously:
+The server loads OmniVoice once and exposes it through three interfaces simultaneously:
 
 - **Gradio Web UI** (port `8001`) — the built-in OmniVoice demo with voice cloning and voice design tabs
 - **REST API** (port `8000`) — FastAPI with JSON and multipart/form-data endpoints, full parameter control
+- **OpenAI-Compatible API** (port `8000`) — drop-in replacement for the OpenAI TTS API (`/v1/audio/speech`, `/v1/models`), works with the official OpenAI SDK
 
-Both share the same model instance — no extra VRAM.
+All three share the same model instance — no extra VRAM.
 
 **Three generation modes:**
 
@@ -469,6 +470,8 @@ All configuration is via environment variables (set in `compose.yaml` or `.env`)
 | `OMNIVOICE_GRADIO_ENABLED` | `true` | Enable/disable Gradio web UI |
 | `OMNIVOICE_GRADIO_PORT` | `8001` | Gradio web UI port |
 | `OMNIVOICE_API_KEY` | _(unset)_ | API key for bearer-token auth. Unset = auth disabled |
+| `OMNIVOICE_CORS_ORIGINS` | _(empty)_ | Comma-separated list of allowed CORS origins. Empty = CORS disabled |
+| `OMNIVOICE_MAX_UPLOAD_BYTES` | `10485760` | Max text file upload size in bytes (default 10 MB) |
 
 ### Using a Pre-Downloaded Model
 
