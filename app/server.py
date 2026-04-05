@@ -37,6 +37,10 @@ Environment variables:
                                (default: wav)
     OMNIVOICE_GRADIO_ENABLED - Enable Gradio UI: true/false (default: true)
     OMNIVOICE_GRADIO_PORT    - Gradio UI port (default: 8001)
+    OMNIVOICE_API_KEY        - API key for bearer-token authentication.
+                               When set, all endpoints except /health require
+                               the header: Authorization: Bearer <key>
+                               Leave unset or empty to disable auth entirely.
 """
 
 import io
@@ -51,8 +55,9 @@ from typing import Optional
 import torch
 import torchaudio
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, UploadFile, File
+from fastapi import Depends, FastAPI, Form, HTTPException, Security, UploadFile, File
 from fastapi.responses import Response, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -76,6 +81,7 @@ PORT = int(os.environ.get("OMNIVOICE_PORT", "8000"))
 DEFAULT_OUTPUT_FORMAT = os.environ.get("OMNIVOICE_OUTPUT_FORMAT", "wav")
 GRADIO_ENABLED = os.environ.get("OMNIVOICE_GRADIO_ENABLED", "true").lower() in ("true", "1", "yes")
 GRADIO_PORT = int(os.environ.get("OMNIVOICE_GRADIO_PORT", "8001"))
+API_KEY = os.environ.get("OMNIVOICE_API_KEY", "").strip()
 
 DTYPE_MAP = {
     "float16": torch.float16,
@@ -90,6 +96,27 @@ MIME_TYPES = {
     "flac": "audio/flac",
     "ogg": "audio/ogg",
 }
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def require_api_key(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
+) -> None:
+    """Dependency that enforces API key auth when OMNIVOICE_API_KEY is set."""
+    if not API_KEY:
+        return  # Auth disabled — all requests allowed
+    if credentials is None or credentials.credentials != API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key. Provide: Authorization: Bearer <key>",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
 
 # ---------------------------------------------------------------------------
 # Sample directory scanner
@@ -293,6 +320,11 @@ async def startup():
         log.error("Invalid OMNIVOICE_DTYPE=%s. Use: float16, bfloat16, float32", DTYPE_STR)
         sys.exit(1)
 
+    if API_KEY:
+        log.info("API key authentication: ENABLED")
+    else:
+        log.warning("API key authentication: DISABLED (set OMNIVOICE_API_KEY to enable)")
+
     log.info("Loading OmniVoice model: %s", MODEL_ID)
     log.info("  device=%s  dtype=%s", DEVICE, DTYPE_STR)
 
@@ -363,7 +395,7 @@ async def health():
 
 
 @app.get("/samples", response_model=list[SampleInfo])
-async def list_samples():
+async def list_samples(_: None = Depends(require_api_key)):
     """List all available voice samples."""
     result = []
     for name, info in sorted(voice_samples.items()):
@@ -380,7 +412,7 @@ async def list_samples():
 
 
 @app.post("/samples/reload")
-async def reload_samples():
+async def reload_samples(_: None = Depends(require_api_key)):
     """Re-scan the samples directory (e.g. after adding new files)."""
     global voice_samples
     voice_samples = scan_samples(SAMPLES_DIR)
@@ -511,7 +543,7 @@ def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name:
 # ---------------------------------------------------------------------------
 
 @app.post("/tts")
-async def synthesize(req: TTSRequest):
+async def synthesize(req: TTSRequest, _: None = Depends(require_api_key)):
     """
     Synthesize speech from text (JSON body).
 
@@ -544,6 +576,7 @@ async def synthesize(req: TTSRequest):
 
 @app.post("/tts/file")
 async def synthesize_from_file(
+    _: None = Depends(require_api_key),
     text_file: UploadFile = File(..., description="Text file (.txt) with content to synthesize."),
     sample: Optional[str] = Form(None, description="Voice sample name for cloning."),
     instruct: Optional[str] = Form(None, description="Speaker attributes for voice design."),
