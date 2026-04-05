@@ -43,7 +43,4 @@ ENV OMNIVOICE_MODEL="k2-fsa/OmniVoice" \
 
 EXPOSE 8000 8001
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-
 CMD ["python3", "server.py"]
