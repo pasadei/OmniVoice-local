@@ -24,8 +24,8 @@ services:
       - OMNIVOICE_OUTPUT_FORMAT=wav
       - OMNIVOICE_GRADIO_ENABLED=true
       - OMNIVOICE_GRADIO_PORT=8001
-      # Uncomment for local model:
-      # - OMNIVOICE_MODEL=/models/OmniVoice
+      # Uncomment for local model (path must match volume mount):
+      # - OMNIVOICE_MODEL=/model/models--k2-fsa--OmniVoice/snapshots/latest
       # Uncomment for HuggingFace mirror:
       # - HF_ENDPOINT=https://hf-mirror.com
       # Uncomment to enable API key authentication:
