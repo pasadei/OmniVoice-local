@@ -31,6 +31,8 @@ services:
       # - OMNIVOICE_MODEL=/models/OmniVoice
       # Uncomment for HuggingFace mirror:
       # - HF_ENDPOINT=https://hf-mirror.com
+      # Uncomment to enable API key authentication:
+      # - OMNIVOICE_API_KEY=change-me-to-a-strong-secret
     deploy:
       resources:
         reservations:

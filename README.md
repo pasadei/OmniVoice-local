@@ -54,17 +54,21 @@ You can add or remove samples at runtime and call `POST /samples/reload` to re-s
 # 1. Place voice samples
 cp my-voice.wav my-voice.txt ./samples/
 
-# 2. Build and start
+# 2. (Optional) Configure environment
+cp .env.example .env
+# Edit .env to set OMNIVOICE_API_KEY and other options
+
+# 3. Build and start
 podman-compose up -d --build
 # or: docker compose up -d --build
 
-# 3. Check health (model loading takes ~60-120s)
+# 4. Check health (model loading takes ~60-120s)
 curl http://localhost:8000/health
 
-# 4. Open Gradio UI
+# 5. Open Gradio UI
 # http://localhost:8001
 
-# 5. Generate speech via API
+# 6. Generate speech via API
 curl -X POST http://localhost:8000/tts \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world!", "sample": "my-voice"}' \
@@ -296,9 +300,45 @@ HTTP 500
 }
 ```
 
+## Authentication
+
+API key authentication is **optional**. When disabled (default), all endpoints are open.
+
+To enable it, set the `OMNIVOICE_API_KEY` environment variable to any non-empty string. Once set, every request to the API (except `GET /health`) must include:
+
+```
+Authorization: Bearer <your-key>
+```
+
+**curl example:**
+
+```bash
+curl -X POST http://localhost:8000/tts \
+  -H "Authorization: Bearer my-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world!", "sample": "my-voice"}' \
+  -o output.wav
+```
+
+`GET /health` is always open so Docker/Podman healthchecks continue to work without credentials.
+
+**Setup:**
+
+```bash
+cp .env.example .env
+# Edit .env, uncomment and set OMNIVOICE_API_KEY
+```
+
+Or in `compose.yaml`:
+
+```yaml
+environment:
+  - OMNIVOICE_API_KEY=change-me-to-a-strong-secret
+```
+
 ## Configuration
 
-All configuration is via environment variables (set in `compose.yaml`):
+All configuration is via environment variables (set in `compose.yaml` or `.env`):
 
 | Variable | Default | Description |
 |---|---|---|
@@ -311,6 +351,7 @@ All configuration is via environment variables (set in `compose.yaml`):
 | `OMNIVOICE_OUTPUT_FORMAT` | `wav` | Default output format when not specified in request |
 | `OMNIVOICE_GRADIO_ENABLED` | `true` | Enable/disable Gradio web UI |
 | `OMNIVOICE_GRADIO_PORT` | `8001` | Gradio web UI port |
+| `OMNIVOICE_API_KEY` | _(unset)_ | API key for bearer-token auth. Unset = auth disabled |
 
 ### Using a Pre-Downloaded Model
 
