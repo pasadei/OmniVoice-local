@@ -58,6 +58,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 import torchaudio
 import uvicorn
@@ -107,6 +108,24 @@ MIME_TYPES = {
     "flac": "audio/flac",
     "ogg": "audio/ogg",
 }
+
+# OpenAI response_format → internal format + MIME type
+# "opus" uses an Ogg container; "aac" falls back to mp3; "pcm" is raw s16le
+OPENAI_FORMAT_MAP = {
+    "mp3":  ("mp3",  "audio/mpeg"),
+    "opus": ("ogg",  "audio/ogg"),
+    "aac":  ("mp3",  "audio/mpeg"),   # best-effort fallback
+    "flac": ("flac", "audio/flac"),
+    "wav":  ("wav",  "audio/wav"),
+    "pcm":  ("pcm",  "audio/pcm"),    # raw s16le, handled specially
+}
+
+# OpenAI model → diffusion steps
+OPENAI_MODEL_STEPS = {
+    "tts-1":    16,
+    "tts-1-hd": 32,
+}
+
 
 # ---------------------------------------------------------------------------
 # Authentication
@@ -320,6 +339,41 @@ class SampleInfo(BaseModel):
     audio_file: str
     has_transcript: bool
     transcript_preview: Optional[str] = None
+
+
+class OpenAISpeechRequest(BaseModel):
+    """
+    OpenAI-compatible /v1/audio/speech request body.
+    See: https://platform.openai.com/docs/api-reference/audio/createSpeech
+    """
+    model: str = Field(
+        ...,
+        description="TTS model to use. 'tts-1' = fast (16 steps), 'tts-1-hd' = quality (32 steps).",
+    )
+    input: str = Field(
+        ...,
+        description="Text to synthesize (max 4096 characters).",
+        max_length=4096,
+    )
+    voice: str = Field(
+        ...,
+        description=(
+            "Voice to use. Standard OpenAI voices (alloy, ash, coral, echo, fable, nova, "
+            "onyx, sage, shimmer) map to a voice sample of the same name when available, "
+            "or fall back to auto-voice mode. Any sample name loaded on the server can also "
+            "be used directly."
+        ),
+    )
+    response_format: str = Field(
+        "mp3",
+        description="Output format: mp3, opus, aac, flac, wav, pcm. Note: aac is served as mp3.",
+    )
+    speed: Optional[float] = Field(
+        None,
+        ge=0.25,
+        le=4.0,
+        description="Speech speed factor (0.25–4.0, default 1.0).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +597,11 @@ def _build_gen_kwargs(
     return gen_kwargs
 
 
-def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name: Optional[str]) -> Response:
-    """Run model.generate() and return audio Response."""
+def _run_model(gen_kwargs: dict) -> tuple[torch.Tensor, float]:
+    """
+    Run model.generate() and return (audio_tensor, elapsed_seconds).
+    Raises HTTPException on failure.
+    """
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet.")
 
@@ -559,8 +616,52 @@ def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name:
     if not audio_tensors:
         raise HTTPException(status_code=500, detail="Model returned empty audio.")
 
-    audio = audio_tensors[0]  # (1, T)
+    return audio_tensors[0], elapsed  # (1, T), seconds
 
+
+def _encode_audio(audio: torch.Tensor, fmt: str, mime_type: str) -> tuple[bytes, str]:
+    """
+    Encode audio tensor to the requested format.
+    Returns (bytes, mime_type).
+    For PCM: raw signed 16-bit little-endian mono.
+    """
+    if fmt == "pcm":
+        samples = audio[0].cpu().float().numpy()
+        samples = np.clip(samples, -1.0, 1.0)
+        pcm_data = (samples * 32767).astype(np.int16).tobytes()
+        return pcm_data, "audio/pcm"
+
+    buf = io.BytesIO()
+    torchaudio.save(buf, audio.cpu(), SAMPLE_RATE, format=fmt)
+    buf.seek(0)
+    return buf.read(), mime_type
+
+
+def _audio_response(audio: torch.Tensor, elapsed: float, fmt: str, mime_type: str, log_tag: str = "") -> Response:
+    """Build a Response from an audio tensor with timing headers."""
+    content, actual_mime = _encode_audio(audio, fmt, mime_type)
+    duration_s = audio.shape[-1] / SAMPLE_RATE
+    rtf = elapsed / max(duration_s, 0.001)
+
+    log.info(
+        "%sGenerated %.2fs audio in %.2fs (RTF=%.3f) format=%s",
+        f"[{log_tag}] " if log_tag else "",
+        duration_s, elapsed, rtf, fmt,
+    )
+
+    return Response(
+        content=content,
+        media_type=actual_mime,
+        headers={
+            "X-Audio-Duration": f"{duration_s:.3f}",
+            "X-Generation-Time": f"{elapsed:.3f}",
+            "X-RTF": f"{rtf:.4f}",
+        },
+    )
+
+
+def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name: Optional[str]) -> Response:
+    """Run model.generate() and return audio Response."""
     fmt = (output_format or DEFAULT_OUTPUT_FORMAT).lower()
     if fmt not in MIME_TYPES:
         raise HTTPException(
@@ -568,26 +669,8 @@ def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name:
             detail=f"Unsupported output format '{fmt}'. Use: {list(MIME_TYPES.keys())}",
         )
 
-    buf = io.BytesIO()
-    torchaudio.save(buf, audio.cpu(), SAMPLE_RATE, format=fmt)
-    buf.seek(0)
-
-    duration_s = audio.shape[-1] / SAMPLE_RATE
-    log.info(
-        "Generated %.2fs audio in %.2fs (RTF=%.3f) format=%s sample=%s",
-        duration_s, elapsed, elapsed / max(duration_s, 0.001), fmt,
-        sample_name or "(none)",
-    )
-
-    return Response(
-        content=buf.read(),
-        media_type=MIME_TYPES[fmt],
-        headers={
-            "X-Audio-Duration": f"{duration_s:.3f}",
-            "X-Generation-Time": f"{elapsed:.3f}",
-            "X-RTF": f"{elapsed / max(duration_s, 0.001):.4f}",
-        },
-    )
+    audio, elapsed = _run_model(gen_kwargs)
+    return _audio_response(audio, elapsed, fmt, MIME_TYPES[fmt], log_tag=sample_name or "")
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +775,93 @@ async def synthesize_from_file(
         audio_chunk_threshold=audio_chunk_threshold,
     )
     return _generate_audio(gen_kwargs, output_format, sample)
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible endpoints  (/v1/audio/speech)
+# ---------------------------------------------------------------------------
+
+def _openai_error(status_code: int, message: str, error_type: str = "invalid_request_error") -> JSONResponse:
+    """Return an error response in the OpenAI error envelope format."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": error_type, "param": None, "code": None}},
+    )
+
+
+@app.post("/v1/audio/speech", tags=["OpenAI-compatible"])
+async def openai_speech(req: OpenAISpeechRequest, _: None = Depends(require_api_key)):
+    """
+    OpenAI-compatible TTS endpoint.
+
+    Drop-in replacement for https://api.openai.com/v1/audio/speech.
+
+    Voice resolution order:
+      1. If a voice sample named exactly ``voice`` is loaded → voice cloning mode.
+      2. Otherwise → auto-voice mode (model picks a voice).
+
+    Model → quality mapping:
+      ``tts-1``     → 16 diffusion steps  (faster)
+      ``tts-1-hd``  → 32 diffusion steps  (higher quality)
+      any other     → server default
+
+    Example::
+
+        curl http://localhost:8000/v1/audio/speech \\
+          -H "Content-Type: application/json" \\
+          -d '{"model":"tts-1","input":"Hello world","voice":"alloy"}' \\
+          --output speech.mp3
+    """
+    if not req.input.strip():
+        return _openai_error(400, "Field 'input' must not be empty.")
+
+    fmt_key = req.response_format.lower()
+    if fmt_key not in OPENAI_FORMAT_MAP:
+        return _openai_error(
+            400,
+            f"Unsupported response_format '{req.response_format}'. "
+            f"Supported: {list(OPENAI_FORMAT_MAP.keys())}",
+        )
+    internal_fmt, mime_type = OPENAI_FORMAT_MAP[fmt_key]
+
+    # Resolve voice → sample or auto
+    voice_key = req.voice.lower()
+    matched_sample: Optional[str] = None
+    if voice_key in voice_samples:
+        matched_sample = voice_key
+    elif req.voice in voice_samples:
+        matched_sample = req.voice
+
+    # Map model name to diffusion steps
+    num_step = OPENAI_MODEL_STEPS.get(req.model)
+
+    try:
+        gen_kwargs = _build_gen_kwargs(
+            text=req.input,
+            sample=matched_sample,
+            speed=req.speed,
+            num_step=num_step,
+        )
+        audio, elapsed = _run_model(gen_kwargs)
+    except HTTPException as exc:
+        return _openai_error(exc.status_code, exc.detail if isinstance(exc.detail, str) else str(exc.detail), error_type="server_error")
+
+    return _audio_response(audio, elapsed, internal_fmt, mime_type, log_tag=f"openai voice={req.voice} model={req.model}")
+
+
+@app.get("/v1/models", tags=["OpenAI-compatible"])
+async def openai_list_models(_: None = Depends(require_api_key)):
+    """
+    OpenAI-compatible model list endpoint.
+
+    Returns the two TTS model IDs recognized by /v1/audio/speech.
+    """
+    now = int(time.time())
+    models = [
+        {"id": "tts-1",    "object": "model", "created": now, "owned_by": "omnivoice"},
+        {"id": "tts-1-hd", "object": "model", "created": now, "owned_by": "omnivoice"},
+    ]
+    return {"object": "list", "data": models}
 
 
 # ---------------------------------------------------------------------------
