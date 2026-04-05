@@ -403,17 +403,6 @@ async def lifespan(application: FastAPI):
     log.info("Loading OmniVoice model: %s", MODEL_ID)
     log.info("  device=%s  dtype=%s", DEVICE, DTYPE_STR)
 
-    # If MODEL_ID looks like a local path, verify it exists before calling
-    # from_pretrained.  Otherwise transformers falls back to the HF Hub,
-    # which rejects absolute-path strings and produces a confusing error.
-    if os.path.isabs(MODEL_ID) and not os.path.isdir(MODEL_ID):
-        log.error(
-            "OMNIVOICE_MODEL points to a local path that does not exist: %s  "
-            "Check your volume mounts or use a HuggingFace model ID instead.",
-            MODEL_ID,
-        )
-        sys.exit(1)
-
     from omnivoice import OmniVoice
     model = OmniVoice.from_pretrained(
         MODEL_ID,
