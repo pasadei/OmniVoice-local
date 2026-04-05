@@ -26,10 +26,8 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir omnivoice
 
 # Install server dependencies
-RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn[standard] \
-    python-multipart
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 WORKDIR /app
 COPY app/server.py /app/server.py
@@ -43,7 +41,7 @@ ENV OMNIVOICE_MODEL="k2-fsa/OmniVoice" \
     OMNIVOICE_PORT="8000" \
     OMNIVOICE_OUTPUT_FORMAT="wav"
 
-EXPOSE 8000
+EXPOSE 8000 8001
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

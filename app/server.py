@@ -41,14 +41,20 @@ Environment variables:
                                When set, all endpoints except /health require
                                the header: Authorization: Bearer <key>
                                Leave unset or empty to disable auth entirely.
+    OMNIVOICE_CORS_ORIGINS   - Comma-separated allowed CORS origins
+                               (default: empty = CORS disabled)
+    OMNIVOICE_MAX_UPLOAD_BYTES - Max text file upload size in bytes
+                               (default: 10485760 = 10 MB)
 """
 
+import hmac
 import io
 import logging
 import os
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +62,7 @@ import torch
 import torchaudio
 import uvicorn
 from fastapi import Depends, FastAPI, Form, HTTPException, Security, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -82,12 +89,16 @@ DEFAULT_OUTPUT_FORMAT = os.environ.get("OMNIVOICE_OUTPUT_FORMAT", "wav")
 GRADIO_ENABLED = os.environ.get("OMNIVOICE_GRADIO_ENABLED", "true").lower() in ("true", "1", "yes")
 GRADIO_PORT = int(os.environ.get("OMNIVOICE_GRADIO_PORT", "8001"))
 API_KEY = os.environ.get("OMNIVOICE_API_KEY", "").strip()
+CORS_ORIGINS = os.environ.get("OMNIVOICE_CORS_ORIGINS", "").strip()
+MAX_UPLOAD_BYTES = int(os.environ.get("OMNIVOICE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
 
 DTYPE_MAP = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
 }
+
+SAMPLE_RATE = 24000
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac"}
 MIME_TYPES = {
@@ -110,7 +121,7 @@ async def require_api_key(
     """Dependency that enforces API key auth when OMNIVOICE_API_KEY is set."""
     if not API_KEY:
         return  # Auth disabled — all requests allowed
-    if credentials is None or credentials.credentials != API_KEY:
+    if credentials is None or not hmac.compare_digest(credentials.credentials, API_KEY):
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing API key. Provide: Authorization: Bearer <key>",
@@ -217,14 +228,20 @@ class TTSRequest(BaseModel):
     # Decoding parameters
     num_step: Optional[int] = Field(
         None,
+        ge=1,
+        le=256,
         description="Number of diffusion unmasking steps (default: 32). Use 16 for faster inference.",
     )
     guidance_scale: Optional[float] = Field(
         None,
+        ge=0.0,
+        le=50.0,
         description="Classifier-free guidance scale (default: 2.0).",
     )
     t_shift: Optional[float] = Field(
         None,
+        ge=0.0,
+        le=1.0,
         description="Time-step shift for noise schedule (default: 0.1).",
     )
     denoise: Optional[bool] = Field(
@@ -235,24 +252,34 @@ class TTSRequest(BaseModel):
     # Sampling parameters
     position_temperature: Optional[float] = Field(
         None,
+        ge=0.0,
+        le=100.0,
         description="Temperature for mask-position selection (default: 5.0). 0 = greedy.",
     )
     class_temperature: Optional[float] = Field(
         None,
+        ge=0.0,
+        le=100.0,
         description="Temperature for token sampling (default: 0.0). 0 = greedy.",
     )
     layer_penalty_factor: Optional[float] = Field(
         None,
+        ge=0.0,
+        le=100.0,
         description="Penalty for deeper codebook layers (default: 5.0).",
     )
 
     # Duration / speed
     duration: Optional[float] = Field(
         None,
+        gt=0.0,
+        le=600.0,
         description="Fixed output duration in seconds. Overrides 'speed'.",
     )
     speed: Optional[float] = Field(
         None,
+        gt=0.0,
+        le=10.0,
         description="Speed factor (>1.0 faster, <1.0 slower). Ignored when 'duration' is set.",
     )
 
@@ -269,10 +296,14 @@ class TTSRequest(BaseModel):
     # Long-form generation
     audio_chunk_duration: Optional[float] = Field(
         None,
+        gt=0.0,
+        le=120.0,
         description="Target chunk duration in seconds for long text (default: 15.0).",
     )
     audio_chunk_threshold: Optional[float] = Field(
         None,
+        gt=0.0,
+        le=600.0,
         description="Estimated duration threshold to activate chunking (default: 30.0).",
     )
 
@@ -295,24 +326,14 @@ class SampleInfo(BaseModel):
 # Application
 # ---------------------------------------------------------------------------
 
-app = FastAPI(
-    title="OmniVoice TTS Server",
-    description=(
-        "HTTP API for OmniVoice zero-shot multilingual TTS. "
-        "Supports voice cloning (via pre-loaded samples), "
-        "voice design (via speaker attribute instructions), "
-        "and auto-voice mode."
-    ),
-    version="1.0.0",
-)
-
 # Globals populated at startup
 model = None
 voice_samples: dict = {}
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Startup / shutdown lifecycle for the application."""
     global model, voice_samples
 
     dtype = DTYPE_MAP.get(DTYPE_STR)
@@ -342,6 +363,33 @@ async def startup():
     # Launch Gradio UI in a background thread, sharing the same model
     if GRADIO_ENABLED:
         _launch_gradio()
+
+    yield  # Application runs here
+
+    log.info("Shutting down OmniVoice server.")
+
+
+app = FastAPI(
+    title="OmniVoice TTS Server",
+    description=(
+        "HTTP API for OmniVoice zero-shot multilingual TTS. "
+        "Supports voice cloning (via pre-loaded samples), "
+        "voice design (via speaker attribute instructions), "
+        "and auto-voice mode."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS middleware (enabled when OMNIVOICE_CORS_ORIGINS is set)
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in CORS_ORIGINS.split(",")],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -382,19 +430,24 @@ def _launch_gradio():
 # API endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@app.get("/health", tags=["System"])
 async def health():
-    """Health check."""
-    return {
-        "status": "ok",
-        "model": MODEL_ID,
-        "device": DEVICE,
-        "gradio_enabled": GRADIO_ENABLED,
-        "gradio_port": GRADIO_PORT if GRADIO_ENABLED else None,
-    }
+    """Health check. Returns 503 while the model is still loading."""
+    ready = model is not None
+    status_code = 200 if ready else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if ready else "loading",
+            "model": MODEL_ID,
+            "device": DEVICE,
+            "gradio_enabled": GRADIO_ENABLED,
+            "gradio_port": GRADIO_PORT if GRADIO_ENABLED else None,
+        },
+    )
 
 
-@app.get("/samples", response_model=list[SampleInfo])
+@app.get("/samples", response_model=list[SampleInfo], tags=["Samples"])
 async def list_samples(_: None = Depends(require_api_key)):
     """List all available voice samples."""
     result = []
@@ -411,7 +464,7 @@ async def list_samples(_: None = Depends(require_api_key)):
     return result
 
 
-@app.post("/samples/reload")
+@app.post("/samples/reload", tags=["Samples"])
 async def reload_samples(_: None = Depends(require_api_key)):
     """Re-scan the samples directory (e.g. after adding new files)."""
     global voice_samples
@@ -507,7 +560,6 @@ def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name:
         raise HTTPException(status_code=500, detail="Model returned empty audio.")
 
     audio = audio_tensors[0]  # (1, T)
-    sample_rate = 24000
 
     fmt = (output_format or DEFAULT_OUTPUT_FORMAT).lower()
     if fmt not in MIME_TYPES:
@@ -517,10 +569,10 @@ def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name:
         )
 
     buf = io.BytesIO()
-    torchaudio.save(buf, audio.cpu(), sample_rate, format=fmt)
+    torchaudio.save(buf, audio.cpu(), SAMPLE_RATE, format=fmt)
     buf.seek(0)
 
-    duration_s = audio.shape[-1] / sample_rate
+    duration_s = audio.shape[-1] / SAMPLE_RATE
     log.info(
         "Generated %.2fs audio in %.2fs (RTF=%.3f) format=%s sample=%s",
         duration_s, elapsed, elapsed / max(duration_s, 0.001), fmt,
@@ -542,7 +594,7 @@ def _generate_audio(gen_kwargs: dict, output_format: Optional[str], sample_name:
 # TTS endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/tts")
+@app.post("/tts", tags=["TTS"])
 async def synthesize(req: TTSRequest, _: None = Depends(require_api_key)):
     """
     Synthesize speech from text (JSON body).
@@ -574,7 +626,7 @@ async def synthesize(req: TTSRequest, _: None = Depends(require_api_key)):
     return _generate_audio(gen_kwargs, req.output_format, req.sample)
 
 
-@app.post("/tts/file")
+@app.post("/tts/file", tags=["TTS"])
 async def synthesize_from_file(
     _: None = Depends(require_api_key),
     text_file: UploadFile = File(..., description="Text file (.txt) with content to synthesize."),
@@ -606,7 +658,12 @@ async def synthesize_from_file(
           -F "num_step=32" \\
           -o output.wav
     """
-    raw = await text_file.read()
+    raw = await text_file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_BYTES} bytes.",
+        )
     try:
         text = raw.decode("utf-8").strip()
     except UnicodeDecodeError:
