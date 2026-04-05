@@ -1,6 +1,6 @@
 # OmniVoice TTS Server
 
-OmniVoice TTS server with Gradio web UI and REST API sharing a single model instance. Voice cloning via sample directory, voice design, full generation parameter control. NVIDIA GPU support (Ampere, Ada Lovelace, Blackwell). Docker/Podman-compose ready.
+OmniVoice TTS server with Gradio web UI, REST API and Openai compatible endpoint sharing a single model instance. Voice cloning via sample directory, voice design, full generation parameter control. NVIDIA GPU support (Ampere, Ada Lovelace, Blackwell). Docker/Podman-compose ready.
 
 Based on [OmniVoice](https://github.com/k2-fsa/OmniVoice) — zero-shot multilingual TTS for 600+ languages. Thanks to the [k2-fsa](https://github.com/k2-fsa) team for open-sourcing the model.
 
