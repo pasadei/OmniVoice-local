@@ -12,12 +12,9 @@ services:
       - ./app:/app
       - ./samples:/samples
       - ./outputs:/tmp/gradio
-      # Pre-downloaded model directory (optional).
-      # If not mounted, the model will be downloaded from HuggingFace
-      # into the HF cache inside the container on first start.
-      # To use a local model, uncomment and set the path:
-      # - /path/to/OmniVoice:/models/OmniVoice
+      - ./model:/model
     environment:
+      - HF_HOME=/model
       - OMNIVOICE_MODEL=k2-fsa/OmniVoice
       - OMNIVOICE_DEVICE=cuda:0
       - OMNIVOICE_DTYPE=float16

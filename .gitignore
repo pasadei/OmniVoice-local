@@ -27,3 +27,7 @@ Thumbs.db
 
 # Audio outputs
 outputs/
+
+# HuggingFace model cache (downloaded at runtime)
+model/
+!model/.gitkeep
