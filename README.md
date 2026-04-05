@@ -257,6 +257,117 @@ curl -X POST http://localhost:8000/tts \
   }' -o longform.wav
 ```
 
+## OpenAI-Compatible API
+
+The server exposes a drop-in replacement for the OpenAI TTS API, so any client that works with `https://api.openai.com` can be pointed at this server instead.
+
+### `POST /v1/audio/speech`
+
+Identical contract to the [OpenAI TTS endpoint](https://platform.openai.com/docs/api-reference/audio/createSpeech).
+
+**Request body (JSON):**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `model` | string | yes | `tts-1` (fast, 16 steps) or `tts-1-hd` (quality, 32 steps) |
+| `input` | string | yes | Text to synthesize. Max 4096 characters. |
+| `voice` | string | yes | Voice name. If a sample with this name is loaded, voice cloning is used. Otherwise auto-voice mode. Standard OpenAI voices (`alloy`, `echo`, `fable`, `nova`, `onyx`, `shimmer`, etc.) work when matching samples exist. |
+| `response_format` | string | no | `mp3` (default), `opus`, `aac`, `flac`, `wav`, `pcm`. Note: `aac` is served as mp3. |
+| `speed` | float | no | Speech speed factor (0.25–4.0). |
+
+**curl example:**
+
+```bash
+curl http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model": "tts-1", "input": "Hello world!", "voice": "alloy"}' \
+  -o speech.mp3
+```
+
+**Python openai SDK example:**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="your-key",   # or any string when auth is disabled
+)
+
+response = client.audio.speech.create(
+    model="tts-1-hd",
+    voice="narrator",    # must match a loaded sample name
+    input="Good evening, and welcome to the show.",
+    response_format="mp3",
+)
+response.stream_to_file("output.mp3")
+```
+
+**Voice resolution:**
+
+1. If a sample named exactly `voice` (case-insensitive) is loaded → voice cloning mode using that sample.
+2. Otherwise → auto-voice mode (model picks a voice).
+
+To use OpenAI's standard voice names (`alloy`, `nova`, etc.) with real cloning, place matching sample files in `./samples/`:
+
+```
+samples/alloy.wav + samples/alloy.txt
+samples/nova.wav  + samples/nova.txt
+```
+
+**Model → quality mapping:**
+
+| `model` value | Diffusion steps | Notes |
+|---|---|---|
+| `tts-1` | 16 | Faster inference |
+| `tts-1-hd` | 32 | Higher quality |
+| any other | server default (32) | Accepted without error |
+
+**Supported `response_format` values:**
+
+| Value | Container | MIME type |
+|---|---|---|
+| `mp3` | MP3 | `audio/mpeg` |
+| `opus` | Ogg/Opus | `audio/ogg` |
+| `aac` | MP3 (fallback) | `audio/mpeg` |
+| `flac` | FLAC | `audio/flac` |
+| `wav` | WAV | `audio/wav` |
+| `pcm` | Raw s16le mono | `audio/pcm` |
+
+### `GET /v1/models`
+
+Returns the list of available TTS model IDs in the OpenAI format.
+
+```bash
+curl http://localhost:8000/v1/models
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"id": "tts-1",    "object": "model", "created": 1234567890, "owned_by": "omnivoice"},
+    {"id": "tts-1-hd", "object": "model", "created": 1234567890, "owned_by": "omnivoice"}
+  ]
+}
+```
+
+### Errors
+
+Errors from `/v1/audio/speech` are returned in the OpenAI error envelope format:
+
+```json
+HTTP 400
+{
+  "error": {
+    "message": "Unsupported response_format 'xyz'. Supported: ['mp3', 'opus', 'aac', 'flac', 'wav', 'pcm']",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": null
+  }
+}
+```
+
 ## Error Handling
 
 The server returns structured JSON errors:
