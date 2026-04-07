@@ -225,6 +225,7 @@ class TTSRequest(BaseModel):
     # Required
     text: str = Field(
         ...,
+        min_length=1,
         description="Text to synthesize.",
     )
 
@@ -672,8 +673,14 @@ async def _wyoming_send_tts(writer: asyncio.StreamWriter, text: str, voice: Opti
         if isinstance(candidate, str):
             sample = candidate
 
-    gen_kwargs = _build_gen_kwargs(text=text, sample=sample if sample in voice_samples else None)
-    audio, elapsed = _run_model(gen_kwargs)
+    try:
+        gen_kwargs = _build_gen_kwargs(text=text, sample=sample if sample in voice_samples else None)
+        audio, elapsed = _run_model(gen_kwargs)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        log.warning("[wyoming] TTS generation refused: %s", detail)
+        await _wyoming_send_event(writer, {"type": "error", "data": {"text": detail}})
+        return
     duration_s = audio.shape[-1] / SAMPLE_RATE
     log.info("[wyoming] Generated %.2fs audio in %.2fs", duration_s, elapsed)
 
@@ -943,6 +950,9 @@ async def synthesize(req: TTSRequest, _: None = Depends(require_api_key)):
       2. Voice design:   set 'instruct' (no 'sample')
       3. Auto voice:     neither 'sample' nor 'instruct'
     """
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Field 'text' must not be empty.")
+
     gen_kwargs = _build_gen_kwargs(
         text=req.text,
         sample=req.sample,
@@ -1006,7 +1016,7 @@ async def synthesize_from_file(
     try:
         text = raw.decode("utf-8").strip()
     except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="Text file must be UTF-8 encoded.")
+        raise HTTPException(status_code=400, detail="Text file must be UTF-8 encoded.") from None
 
     if not text:
         raise HTTPException(status_code=400, detail="Text file is empty.")
@@ -1101,6 +1111,9 @@ async def openai_speech(req: OpenAISpeechRequest, _: None = Depends(require_api_
         audio, elapsed = _run_model(gen_kwargs)
     except HTTPException as exc:
         return _openai_error(exc.status_code, exc.detail if isinstance(exc.detail, str) else str(exc.detail), error_type="server_error")
+    except Exception as exc:
+        log.exception("OpenAI endpoint: unexpected generation error")
+        return _openai_error(500, f"Generation error: {exc}", error_type="server_error")
 
     return _audio_response(audio, elapsed, internal_fmt, mime_type, log_tag=f"openai voice={req.voice} model={req.model}")
 
