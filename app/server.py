@@ -37,6 +37,10 @@ Environment variables:
                                (default: wav)
     OMNIVOICE_GRADIO_ENABLED - Enable Gradio UI: true/false (default: true)
     OMNIVOICE_GRADIO_PORT    - Gradio UI port (default: 8001)
+    OMNIVOICE_WYOMING_ENABLED - Enable Wyoming TCP API for Home Assistant
+                               (default: false)
+    OMNIVOICE_WYOMING_HOST   - Wyoming bind address (default: 0.0.0.0)
+    OMNIVOICE_WYOMING_PORT   - Wyoming TCP port (default: 10200)
     OMNIVOICE_API_KEY        - API key for bearer-token authentication.
                                When set, all endpoints except /health require
                                the header: Authorization: Bearer <key>
@@ -49,11 +53,13 @@ Environment variables:
 
 import hmac
 import io
+import json
 import logging
 import os
 import sys
 import threading
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -89,6 +95,9 @@ PORT = int(os.environ.get("OMNIVOICE_PORT", "8000"))
 DEFAULT_OUTPUT_FORMAT = os.environ.get("OMNIVOICE_OUTPUT_FORMAT", "wav")
 GRADIO_ENABLED = os.environ.get("OMNIVOICE_GRADIO_ENABLED", "true").lower() in ("true", "1", "yes")
 GRADIO_PORT = int(os.environ.get("OMNIVOICE_GRADIO_PORT", "8001"))
+WYOMING_ENABLED = os.environ.get("OMNIVOICE_WYOMING_ENABLED", "false").lower() in ("true", "1", "yes")
+WYOMING_HOST = os.environ.get("OMNIVOICE_WYOMING_HOST", "0.0.0.0")
+WYOMING_PORT = int(os.environ.get("OMNIVOICE_WYOMING_PORT", "10200"))
 API_KEY = os.environ.get("OMNIVOICE_API_KEY", "").strip()
 CORS_ORIGINS = os.environ.get("OMNIVOICE_CORS_ORIGINS", "").strip()
 MAX_UPLOAD_BYTES = int(os.environ.get("OMNIVOICE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
@@ -383,12 +392,13 @@ class OpenAISpeechRequest(BaseModel):
 # Globals populated at startup
 model = None
 voice_samples: dict = {}
+wyoming_server = None
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup / shutdown lifecycle for the application."""
-    global model, voice_samples
+    global model, voice_samples, wyoming_server
 
     dtype = DTYPE_MAP.get(DTYPE_STR)
     if dtype is None:
@@ -418,7 +428,14 @@ async def lifespan(application: FastAPI):
     if GRADIO_ENABLED:
         _launch_gradio()
 
+    if WYOMING_ENABLED:
+        wyoming_server = _launch_wyoming_server()
+
     yield  # Application runs here
+
+    if wyoming_server is not None:
+        wyoming_server.stop()
+        wyoming_server = None
 
     log.info("Shutting down OmniVoice server.")
 
@@ -478,6 +495,194 @@ def _launch_gradio():
     thread = threading.Thread(target=_run, name="gradio-ui", daemon=True)
     thread.start()
     log.info("Gradio UI thread started.")
+
+
+# ---------------------------------------------------------------------------
+# Wyoming protocol integration
+# ---------------------------------------------------------------------------
+
+class _WyomingServer:
+    """Minimal Wyoming TCP server for Home Assistant integration."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self._thread = threading.Thread(target=self._run, name="wyoming-server", daemon=True)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._server: Optional[asyncio.base_events.Server] = None
+        self._ready = threading.Event()
+
+    def start(self):
+        self._thread.start()
+        self._ready.wait(timeout=10)
+
+    def stop(self):
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(self._shutdown)
+        self._thread.join(timeout=10)
+
+    def _shutdown(self):
+        if self._server is not None:
+            self._server.close()
+        for task in asyncio.all_tasks(self._loop):
+            task.cancel()
+
+    def _run(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._serve())
+
+    async def _serve(self):
+        self._server = await asyncio.start_server(self._handle_client, self.host, self.port)
+        log.info("Wyoming TCP server listening on %s:%d", self.host, self.port)
+        self._ready.set()
+        async with self._server:
+            await self._server.serve_forever()
+
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        synth_state = {"voice": None, "chunks": []}
+        peer = writer.get_extra_info("peername")
+        log.info("Wyoming client connected: %s", peer)
+        try:
+            while True:
+                event = await _wyoming_read_event(reader)
+                if event is None:
+                    break
+                event_type = event.get("type")
+                data = event.get("data") or {}
+
+                if event_type == "describe":
+                    await _wyoming_send_event(writer, _wyoming_info_event())
+                elif event_type == "synthesize":
+                    text = str(data.get("text", "")).strip()
+                    if text:
+                        voice = data.get("voice")
+                        await _wyoming_send_tts(writer, text, voice)
+                elif event_type == "synthesize-start":
+                    synth_state["voice"] = data.get("voice")
+                    synth_state["chunks"] = []
+                elif event_type == "synthesize-chunk":
+                    chunk = str(data.get("text", ""))
+                    if chunk:
+                        synth_state["chunks"].append(chunk)
+                elif event_type == "synthesize-stop":
+                    text = "".join(synth_state["chunks"]).strip()
+                    if text:
+                        await _wyoming_send_tts(writer, text, synth_state["voice"])
+                    await _wyoming_send_event(writer, {"type": "synthesize-stopped"})
+                    synth_state["voice"] = None
+                    synth_state["chunks"] = []
+                else:
+                    log.debug("Ignoring Wyoming event type: %s", event_type)
+        except Exception as exc:
+            log.warning("Wyoming connection error from %s: %s", peer, exc)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            log.info("Wyoming client disconnected: %s", peer)
+
+
+def _launch_wyoming_server() -> _WyomingServer:
+    server = _WyomingServer(WYOMING_HOST, WYOMING_PORT)
+    server.start()
+    return server
+
+
+def _wyoming_info_event() -> dict:
+    speakers = [{"name": s} for s in sorted(voice_samples.keys())]
+    model_info = {
+        "name": "omnivoice",
+        "languages": ["*"],
+        "attribution": {
+            "name": "k2-fsa OmniVoice",
+            "url": "https://github.com/k2-fsa/OmniVoice",
+        },
+        "installed": True,
+        "description": "OmniVoice zero-shot multilingual TTS",
+    }
+    if speakers:
+        model_info["speakers"] = speakers
+    return {
+        "type": "info",
+        "data": {
+            "tts": [{
+                "models": [model_info],
+                "supports_synthesize_streaming": True,
+            }]
+        },
+    }
+
+
+async def _wyoming_send_tts(writer: asyncio.StreamWriter, text: str, voice: Optional[dict]):
+    sample = None
+    if isinstance(voice, dict):
+        candidate = voice.get("name") or voice.get("speaker")
+        if isinstance(candidate, str):
+            sample = candidate
+
+    gen_kwargs = _build_gen_kwargs(text=text, sample=sample if sample in voice_samples else None)
+    audio, elapsed = _run_model(gen_kwargs)
+    duration_s = audio.shape[-1] / SAMPLE_RATE
+    log.info("[wyoming] Generated %.2fs audio in %.2fs", duration_s, elapsed)
+
+    samples = audio[0].cpu().float().numpy()
+    samples = np.clip(samples, -1.0, 1.0)
+    pcm = (samples * 32767).astype(np.int16).tobytes()
+
+    await _wyoming_send_event(
+        writer,
+        {"type": "audio-start", "data": {"rate": SAMPLE_RATE, "width": 2, "channels": 1}},
+    )
+    chunk_size = 8192
+    for i in range(0, len(pcm), chunk_size):
+        await _wyoming_send_event(
+            writer,
+            {
+                "type": "audio-chunk",
+                "data": {"rate": SAMPLE_RATE, "width": 2, "channels": 1},
+                "payload": pcm[i:i + chunk_size],
+            },
+        )
+    await _wyoming_send_event(writer, {"type": "audio-stop"})
+
+
+async def _wyoming_send_event(writer: asyncio.StreamWriter, event: dict):
+    payload = event.get("payload")
+    header = {
+        "type": event["type"],
+    }
+    data = event.get("data")
+    if data:
+        header["data"] = data
+    if payload:
+        header["payload_length"] = len(payload)
+
+    writer.write((json.dumps(header, ensure_ascii=False) + "\n").encode("utf-8"))
+    if payload:
+        writer.write(payload)
+    await writer.drain()
+
+
+async def _wyoming_read_event(reader: asyncio.StreamReader) -> Optional[dict]:
+    line = await reader.readline()
+    if not line:
+        return None
+    header = json.loads(line.decode("utf-8").strip())
+
+    data = header.get("data", {})
+    data_length = int(header.get("data_length") or 0)
+    if data_length > 0:
+        extra_data = await reader.readexactly(data_length)
+        extra_json = json.loads(extra_data.decode("utf-8"))
+        if isinstance(extra_json, dict):
+            data = {**data, **extra_json}
+
+    payload_length = int(header.get("payload_length") or 0)
+    if payload_length > 0:
+        await reader.readexactly(payload_length)  # payload not needed for TTS requests
+
+    return {"type": header.get("type"), "data": data}
 
 
 # ---------------------------------------------------------------------------

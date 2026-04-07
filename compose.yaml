@@ -8,6 +8,7 @@ services:
     ports:
       - "8000:8000"
       - "8001:8001"
+      - "10200:10200"
     volumes:
       - ./app:/app
       - ./samples:/samples
@@ -24,6 +25,9 @@ services:
       - OMNIVOICE_OUTPUT_FORMAT=wav
       - OMNIVOICE_GRADIO_ENABLED=true
       - OMNIVOICE_GRADIO_PORT=8001
+      - OMNIVOICE_WYOMING_ENABLED=true
+      - OMNIVOICE_WYOMING_HOST=0.0.0.0
+      - OMNIVOICE_WYOMING_PORT=10200
       # Uncomment for local model:
       # - OMNIVOICE_MODEL=/models/OmniVoice
       # Uncomment for HuggingFace mirror:

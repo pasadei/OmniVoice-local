@@ -1,6 +1,6 @@
 # OmniVoice TTS Server
 
-OmniVoice TTS server with Gradio web UI, REST API, and OpenAI-compatible endpoint sharing a single model instance. Voice cloning via sample directory, voice design, full generation parameter control. NVIDIA GPU support (Ampere, Ada Lovelace, Blackwell). Docker/Podman-compose ready.
+OmniVoice TTS server with Gradio web UI, REST API, OpenAI-compatible endpoint, and Wyoming (Home Assistant) endpoint sharing a single model instance. Voice cloning via sample directory, voice design, full generation parameter control. NVIDIA GPU support (Ampere, Ada Lovelace, Blackwell). Docker/Podman-compose ready.
 
 Based on [OmniVoice](https://github.com/k2-fsa/OmniVoice) — zero-shot multilingual TTS for 600+ languages. Thanks to the [k2-fsa](https://github.com/k2-fsa) team for open-sourcing the model.
 
@@ -11,6 +11,7 @@ The server loads OmniVoice once and exposes it through three interfaces simultan
 - **Gradio Web UI** (port `8001`) — the built-in OmniVoice demo with voice cloning and voice design tabs
 - **REST API** (port `8000`) — FastAPI with JSON and multipart/form-data endpoints, full parameter control
 - **OpenAI-Compatible API** (port `8000`) — drop-in replacement for the OpenAI TTS API (`/v1/audio/speech`, `/v1/models`), works with the official OpenAI SDK
+- **Wyoming TCP API** (port `10200`) — Home Assistant compatible TTS service for Assist pipelines
 
 All three share the same model instance — no extra VRAM.
 
@@ -75,6 +76,22 @@ curl -X POST http://localhost:8000/tts \
   -d '{"text": "Hello world!", "sample": "my-voice"}' \
   -o output.wav
 ```
+
+
+### Wyoming / Home Assistant
+
+Enable Wyoming by setting:
+
+- `OMNIVOICE_WYOMING_ENABLED=true`
+- `OMNIVOICE_WYOMING_HOST=0.0.0.0`
+- `OMNIVOICE_WYOMING_PORT=10200`
+
+In Home Assistant add a Wyoming provider pointing to this container IP and port `10200`.
+
+Supported events:
+- `describe` → returns `info` with TTS model metadata and available sample speakers
+- `synthesize` → returns PCM audio stream (`audio-start`/`audio-chunk`/`audio-stop`)
+- `synthesize-start`/`synthesize-chunk`/`synthesize-stop` streaming text mode
 
 ## API Reference
 
