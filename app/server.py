@@ -533,7 +533,13 @@ class _WyomingServer:
     def _run(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._serve())
+        try:
+            self._loop.run_until_complete(self._serve())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            self._loop.close()
 
     async def _serve(self):
         self._server = await asyncio.start_server(self._handle_client, self.host, self.port)
