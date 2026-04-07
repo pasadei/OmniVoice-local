@@ -98,7 +98,14 @@ GRADIO_PORT = int(os.environ.get("OMNIVOICE_GRADIO_PORT", "8001"))
 WYOMING_ENABLED = os.environ.get("OMNIVOICE_WYOMING_ENABLED", "false").lower() in ("true", "1", "yes")
 WYOMING_HOST = os.environ.get("OMNIVOICE_WYOMING_HOST", "0.0.0.0")
 WYOMING_PORT = int(os.environ.get("OMNIVOICE_WYOMING_PORT", "10200"))
-WYOMING_LANGUAGES = os.environ.get("OMNIVOICE_WYOMING_LANGUAGES", "en")
+_OMNIVOICE_DEFAULT_LANGUAGES = (
+    "af,am,ar,as,az,ba,be,bg,bn,bo,br,bs,ca,cs,cy,da,de,el,en,es,et,eu,fa,"
+    "fi,fo,fr,ga,gl,gu,ha,he,hi,hr,hu,hy,id,is,it,ja,jv,ka,kk,km,kn,ko,"
+    "ku,ky,la,lb,ln,lo,lt,lv,mg,mi,mk,ml,mn,mr,ms,mt,my,ne,nl,nn,no,oc,"
+    "or,pa,pl,ps,pt,ro,ru,sa,sd,si,sk,sl,sn,so,sq,sr,su,sv,sw,ta,te,tg,"
+    "th,tk,tl,tr,tt,uk,ur,uz,vi,yo,zh,zu"
+)
+WYOMING_LANGUAGES = os.environ.get("OMNIVOICE_WYOMING_LANGUAGES", _OMNIVOICE_DEFAULT_LANGUAGES)
 API_KEY = os.environ.get("OMNIVOICE_API_KEY", "").strip()
 CORS_ORIGINS = os.environ.get("OMNIVOICE_CORS_ORIGINS", "").strip()
 MAX_UPLOAD_BYTES = int(os.environ.get("OMNIVOICE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
