@@ -98,6 +98,7 @@ GRADIO_PORT = int(os.environ.get("OMNIVOICE_GRADIO_PORT", "8001"))
 WYOMING_ENABLED = os.environ.get("OMNIVOICE_WYOMING_ENABLED", "false").lower() in ("true", "1", "yes")
 WYOMING_HOST = os.environ.get("OMNIVOICE_WYOMING_HOST", "0.0.0.0")
 WYOMING_PORT = int(os.environ.get("OMNIVOICE_WYOMING_PORT", "10200"))
+WYOMING_LANGUAGES = os.environ.get("OMNIVOICE_WYOMING_LANGUAGES", "en")
 API_KEY = os.environ.get("OMNIVOICE_API_KEY", "").strip()
 CORS_ORIGINS = os.environ.get("OMNIVOICE_CORS_ORIGINS", "").strip()
 MAX_UPLOAD_BYTES = int(os.environ.get("OMNIVOICE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
@@ -591,9 +592,10 @@ def _launch_wyoming_server() -> _WyomingServer:
 
 def _wyoming_info_event() -> dict:
     speakers = [{"name": s} for s in sorted(voice_samples.keys())]
+    languages = _resolve_wyoming_languages()
     model_info = {
         "name": "omnivoice",
-        "languages": ["*"],
+        "languages": languages,
         "attribution": {
             "name": "k2-fsa OmniVoice",
             "url": "https://github.com/k2-fsa/OmniVoice",
@@ -612,6 +614,45 @@ def _wyoming_info_event() -> dict:
             }]
         },
     }
+
+
+def _resolve_wyoming_languages() -> list[str]:
+    """
+    Return supported language codes for Wyoming `describe`.
+
+    Tries to auto-detect from the loaded model/tokenizer first.
+    If unavailable, falls back to OMNIVOICE_WYOMING_LANGUAGES (comma-separated).
+    """
+    discovered: list[str] = []
+    tokenizer = getattr(model, "tokenizer", None)
+
+    # Common patterns from Whisper-like tokenizers
+    if tokenizer is not None:
+        for attr in ("_LANGUAGE_CODES", "LANGUAGE_CODES", "language_codes", "languages"):
+            value = getattr(tokenizer, attr, None)
+            if isinstance(value, (list, tuple, set)):
+                discovered = [str(code).strip() for code in value if str(code).strip()]
+                if discovered:
+                    break
+
+    # Model-level optional method
+    if not discovered:
+        get_languages = getattr(model, "get_supported_languages", None)
+        if callable(get_languages):
+            try:
+                value = get_languages()
+                if isinstance(value, (list, tuple, set)):
+                    discovered = [str(code).strip() for code in value if str(code).strip()]
+            except Exception as exc:
+                log.debug("Failed to get languages from model.get_supported_languages: %s", exc)
+
+    if discovered:
+        return sorted(set(discovered))
+
+    fallback = [code.strip() for code in WYOMING_LANGUAGES.split(",") if code.strip()]
+    if not fallback:
+        fallback = ["en"]
+    return sorted(set(fallback))
 
 
 async def _wyoming_send_tts(writer: asyncio.StreamWriter, text: str, voice: Optional[dict]):
