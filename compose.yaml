@@ -32,6 +32,8 @@ services:
       # - OMNIVOICE_MODEL=/models/OmniVoice
       # Uncomment for HuggingFace mirror:
       # - HF_ENDPOINT=https://hf-mirror.com
+      # Uncomment to override Wyoming advertised languages (comma-separated ISO 639-1):
+      # - OMNIVOICE_WYOMING_LANGUAGES=en,ru,de
       # Uncomment to enable API key authentication:
       # - OMNIVOICE_API_KEY=change-me-to-a-strong-secret
     deploy:
