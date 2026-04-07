@@ -6,14 +6,14 @@ Based on [OmniVoice](https://github.com/k2-fsa/OmniVoice) — zero-shot multilin
 
 ## Overview
 
-The server loads OmniVoice once and exposes it through three interfaces simultaneously:
+The server loads OmniVoice once and exposes it through four interfaces simultaneously:
 
 - **Gradio Web UI** (port `8001`) — the built-in OmniVoice demo with voice cloning and voice design tabs
 - **REST API** (port `8000`) — FastAPI with JSON and multipart/form-data endpoints, full parameter control
 - **OpenAI-Compatible API** (port `8000`) — drop-in replacement for the OpenAI TTS API (`/v1/audio/speech`, `/v1/models`), works with the official OpenAI SDK
 - **Wyoming TCP API** (port `10200`) — Home Assistant compatible TTS service for Assist pipelines
 
-All three share the same model instance — no extra VRAM.
+All four share the same model instance — no extra VRAM.
 
 **Three generation modes:**
 
@@ -56,9 +56,9 @@ You can add or remove samples at runtime and call `POST /samples/reload` to re-s
 # 1. Place voice samples
 cp my-voice.wav my-voice.txt ./samples/
 
-# 2. (Optional) Configure environment
+# 2. (Optional) Configure API key authentication
 cp .env.example .env
-# Edit .env to set OMNIVOICE_API_KEY and other options
+# Edit .env to set OMNIVOICE_API_KEY (other options live in compose.yaml)
 
 # 3. Build and start
 podman-compose up -d --build
