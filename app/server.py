@@ -911,14 +911,24 @@ def _encode_audio(audio: torch.Tensor, fmt: str, mime_type: str) -> tuple[bytes,
     Returns (bytes, mime_type).
     For PCM: raw signed 16-bit little-endian mono.
     """
+    if isinstance(audio, np.ndarray):
+        audio = torch.from_numpy(audio)
+    elif not isinstance(audio, torch.Tensor):
+        audio = torch.as_tensor(audio)
+
+    if audio.ndim == 1:
+        audio = audio.unsqueeze(0)
+
+    audio = audio.detach().cpu().float()
+
     if fmt == "pcm":
-        samples = audio[0].cpu().float().numpy()
+        samples = audio[0].numpy()
         samples = np.clip(samples, -1.0, 1.0)
         pcm_data = (samples * 32767).astype(np.int16).tobytes()
         return pcm_data, "audio/pcm"
 
     buf = io.BytesIO()
-    torchaudio.save(buf, audio.cpu(), SAMPLE_RATE, format=fmt)
+    torchaudio.save(buf, audio, SAMPLE_RATE, format=fmt)
     buf.seek(0)
     return buf.read(), mime_type
 
