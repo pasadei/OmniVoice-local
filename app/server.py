@@ -905,20 +905,30 @@ def _run_model(gen_kwargs: dict) -> tuple[torch.Tensor, float]:
     return audio_tensors[0], elapsed  # (1, T), seconds
 
 
-def _encode_audio(audio: torch.Tensor, fmt: str, mime_type: str) -> tuple[bytes, str]:
+def _encode_audio(audio: torch.Tensor | np.ndarray, fmt: str, mime_type: str) -> tuple[bytes, str]:
     """
     Encode audio tensor to the requested format.
     Returns (bytes, mime_type).
     For PCM: raw signed 16-bit little-endian mono.
     """
+    if isinstance(audio, np.ndarray):
+        audio = torch.from_numpy(audio)
+    elif not isinstance(audio, torch.Tensor):
+        raise TypeError(f"audio must be Tensor or ndarray, got {type(audio).__name__}")
+
+    if audio.ndim == 1:
+        audio = audio.unsqueeze(0)
+    elif audio.ndim != 2:
+        raise ValueError(f"expected 1D or 2D audio, got shape {tuple(audio.shape)}")
+
+    audio = audio.detach().cpu().float().clamp_(-1.0, 1.0)
+
     if fmt == "pcm":
-        samples = audio[0].cpu().float().numpy()
-        samples = np.clip(samples, -1.0, 1.0)
-        pcm_data = (samples * 32767).astype(np.int16).tobytes()
+        pcm_data = (audio[0].numpy() * 32767).astype(np.int16).tobytes()
         return pcm_data, "audio/pcm"
 
     buf = io.BytesIO()
-    torchaudio.save(buf, audio.cpu(), SAMPLE_RATE, format=fmt)
+    torchaudio.save(buf, audio, SAMPLE_RATE, format=fmt)
     buf.seek(0)
     return buf.read(), mime_type
 
