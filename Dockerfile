@@ -30,7 +30,7 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 WORKDIR /app
-COPY app/server.py /app/server.py
+COPY app/ /app/
 
 # Defaults (override via environment or compose)
 ENV OMNIVOICE_MODEL="k2-fsa/OmniVoice" \

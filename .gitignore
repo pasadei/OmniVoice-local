@@ -25,8 +25,23 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Local git worktrees
+.worktrees/
+
 # Audio outputs
 outputs/
+
+# Sample audio content (keep directory via .gitkeep)
+samples/*.wav
+samples/*.txt
+
+# Planning docs (superpowers design artifacts)
+docs/superpowers/
+
+# Voice samples and assets
+voices/
+
+
 
 # HuggingFace model cache (downloaded at runtime)
 model/

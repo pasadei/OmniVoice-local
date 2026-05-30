@@ -11,14 +11,20 @@ services:
       - "10200:10200"
     volumes:
       - ./app:/app
+      - ./voices:/voices
       - ./samples:/samples
       - ./outputs:/tmp/gradio
       - ./model:/model
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - HF_HOME=/model
+      - HF_HUB_OFFLINE=1
+      - HF_TOKEN
       - OMNIVOICE_MODEL=k2-fsa/OmniVoice
       - OMNIVOICE_DEVICE=cuda:0
       - OMNIVOICE_DTYPE=float16
+      - OMNIVOICE_VOICES_DIR=/voices
       - OMNIVOICE_SAMPLES_DIR=/samples
       - OMNIVOICE_HOST=0.0.0.0
       - OMNIVOICE_PORT=8000
@@ -28,6 +34,21 @@ services:
       - OMNIVOICE_WYOMING_ENABLED=true
       - OMNIVOICE_WYOMING_HOST=0.0.0.0
       - OMNIVOICE_WYOMING_PORT=10200
+      - OMNIVOICE_WS_ENABLED=true
+      - OMNIVOICE_WS_DEFAULT_NUM_STEP=16
+      - OMNIVOICE_WS_MAX_SENTENCE_CHARS=150
+      - OMNIVOICE_WS_MIN_SENTENCE_CHARS=20
+      - OMNIVOICE_WS_BUFFER_TIMEOUT_MS=2000
+      - OMNIVOICE_CONVERSATION_WS_ENABLED=true
+      - OMNIVOICE_CONVERSATION_WARMUP_ENABLED=true
+      - OMNIVOICE_ASR_LANGUAGE_STICKY_MIN_PROB=0.8
+      - OMNIVOICE_LLM_PROVIDER=openai
+      - OMNIVOICE_OPENAI_BASE_URL=http://host.docker.internal:9000/v1
+      - OMNIVOICE_OPENAI_MODEL=qwen3-coder
+      # - OMNIVOICE_OPENAI_API_KEY=sk-...
+      # - OMNIVOICE_OLLAMA_HOST=http://host.docker.internal:8010
+      # - OMNIVOICE_OLLAMA_MODEL=hermes3:8b
+      
       # Uncomment for local model:
       # - OMNIVOICE_MODEL=/models/OmniVoice
       # Uncomment for HuggingFace mirror:
@@ -35,7 +56,7 @@ services:
       # Uncomment to override Wyoming advertised languages (comma-separated ISO 639-1):
       # - OMNIVOICE_WYOMING_LANGUAGES=en,ru,de
       # Uncomment to enable API key authentication:
-      # - OMNIVOICE_API_KEY=change-me-to-a-strong-secret
+      # - OMNIVOICE_API_KEY=${OMNIVOICE_API_KEY}
     deploy:
       resources:
         reservations:

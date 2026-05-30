@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OmniVoice Full-Duplex</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .status { display: flex; gap: 12px; align-items: center; padding: 12px; background: #2a2a4e; border-radius: 8px; margin-bottom: 16px; }
+        .status-dot { width: 12px; height: 12px; border-radius: 50%; background: #666; }
+        .status-dot.connected { background: #22c55e; }
+        .status-dot.error { background: #ef4444; }
+        .status-dot.listening { background: #3b82f6; animation: pulse 1s infinite; }
+        .status-dot.speaking { background: #f59e0b; animation: pulse 0.5s infinite; }
+        @keyframes pulse { 50% { opacity: 0.5; } }
+        .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .settings label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: #aaa; }
+        .settings input, .settings select { padding: 8px; background: #2a2a4e; border: 1px solid #444; border-radius: 6px; color: #eee; font-size: 14px; }
+        .visualizer { height: 100px; background: #0f0f1e; border-radius: 8px; margin-bottom: 16px; position: relative; overflow: hidden; }
+        canvas { width: 100%; height: 100%; display: block; }
+        .vis-label { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; font-weight: bold; color: rgba(255,255,255,0.3); pointer-events: none; }
+        .controls { display: flex; gap: 12px; margin-bottom: 16px; }
+        button { padding: 12px 24px; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-connect { background: #3b82f6; color: white; }
+        .btn-connect:hover:not(:disabled) { background: #2563eb; }
+        .btn-disconnect { background: #6b7280; color: white; }
+        .btn-disconnect:hover:not(:disabled) { background: #4b5563; }
+        .btn-talk { background: #22c55e; color: white; flex: 1; }
+        .btn-talk:hover:not(:disabled) { background: #16a34a; }
+        .btn-talk.active { background: #ef4444; }
+        .btn-talk.active:hover:not(:disabled) { background: #dc2626; }
+        .log { background: #0f0f1e; border-radius: 8px; padding: 16px; max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 13px; line-height: 1.6; }
+        .log-entry { margin-bottom: 8px; padding: 8px; background: #1a1a2e; border-radius: 4px; }
+        .log-entry.user { border-left: 3px solid #3b82f6; }
+        .log-entry.assistant { border-left: 3px solid #22c55e; }
+        .log-entry.system { border-left: 3px solid #f59e0b; }
+        .log-label { font-weight: bold; margin-bottom: 4px; }
+        .log-label.user { color: #3b82f6; }
+        .log-label.assistant { color: #22c55e; }
+        .log-label.system { color: #f59e0b; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 style="margin-bottom: 20px;">OmniVoice Full-Duplex</h1>
+        
+        <div class="status">
+            <div class="status-dot" id="status-dot"></div>
+            <div id="status-text">Disconnected</div>
+            <div style="margin-left: auto; font-size: 12px; color: #888;" id="session-info"></div>
+        </div>
+
+        <div class="settings">
+            <label>
+                WS URL
+                <input type="text" id="ws-url" value="">
+            </label>
+            <label>
+                Voice
+                <select id="voice-select">
+                    <option value="">— voice design —</option>
+                </select>
+            </label>
+            <label>
+                Language
+                <select id="lang-select">
+                    <option value="">auto</option>
+                    <option value="it" selected>it</option>
+                    <option value="en">en</option>
+                    <option value="fr">fr</option>
+                    <option value="de">de</option>
+                    <option value="es">es</option>
+                    <option value="pt">pt</option>
+                    <option value="zh">zh</option>
+                    <option value="ja">ja</option>
+                    <option value="ko">ko</option>
+                    <option value="ru">ru</option>
+                </select>
+            </label>
+            <label>
+                Instruct
+                <input type="text" id="instruct-input" placeholder="e.g. female, calm">
+            </label>
+        </div>
+
+        <div class="visualizer">
+            <canvas id="vis-canvas"></canvas>
+            <div class="vis-label" id="vis-label">IDLE</div>
+        </div>
+
+        <div class="controls">
+            <button class="btn-connect" id="btn-connect">Connect</button>
+            <button class="btn-disconnect" id="btn-disconnect" disabled>Disconnect</button>
+            <button class="btn-talk" id="btn-talk" disabled>Hold to Talk</button>
+        </div>
+
+        <div class="log" id="conversation-log">
+            <div class="log-entry system">
+                <div class="log-label system">System</div>
+                <div>Ready to connect...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+// Canvas roundRect polyfill
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+        if (w < 2 * r) r = w / 2;
+        if (h < 2 * r) r = h / 2;
+        this.beginPath();
+        this.moveTo(x + r, y);
+        this.arcTo(x + w, y, x + w, y + h, r);
+        this.arcTo(x + w, y + h, x, y + h, r);
+        this.arcTo(x, y + h, x, y, r);
+        this.arcTo(x, y, x + w, y, r);
+        this.closePath();
+        return this;
+    };
+}
+
+// Audio Manager
+class AudioManager {
+    constructor() {
+        this.stream = null;
+        this.ctx = null;
+        this.processor = null;
+        this.source = null;
+        this.onAudio = null;
+        this._capturing = false;
+        this._sampleRate = 16000;
+        this._chunkSize = 512;
+    }
+
+    get capturing() { return this._capturing; }
+
+    async start() {
+        if (this.stream) return;
+        this.stream = await navigator.mediaDevices.getUserMedia({
+            audio: { sampleRate: this._sampleRate, channelCount: 1, echoCancellation: true }
+        });
+        this.ctx = new AudioContext({ sampleRate: this._sampleRate });
+        this.source = this.ctx.createMediaStreamSource(this.stream);
+        this.processor = this.ctx.createScriptProcessor(this._chunkSize, 1, 1);
+        this.processor.onaudioprocess = (e) => {
+            const input = e.inputBuffer.getChannelData(0);
+            const pcm = new Int16Array(input.length);
+            for (let i = 0; i < input.length; i++) {
+                const s = Math.max(-1, Math.min(1, input[i]));
+                pcm[i] = s < 0 ? s * 32768 : s * 32767;
+            }
+            if (this.onAudio) this.onAudio(pcm);
+        };
+        this.source.connect(this.processor);
+        this.processor.connect(this.ctx.destination);
+        this._capturing = true;
+    }
+
+    stop() {
+        this._capturing = false;
+        if (this.processor) { this.processor.disconnect(); this.processor = null; }
+        if (this.source) { this.source.disconnect(); this.source = null; }
+        if (this.ctx) { this.ctx.close(); this.ctx = null; }
+        if (this.stream) {
+            this.stream.getTracks().forEach(t => t.stop());
+            this.stream = null;
+        }
+    }
+}
+
+// Energy-based VAD
+class VAD {
+    constructor(opts = {}) {
+        this.threshold = opts.threshold || 0.02;
+        this.minSpeechFrames = opts.minSpeechFrames || 5;
+        this.hangoverFrames = opts.hangoverFrames || 18;
+        this._rmsHistory = [];
+        this._speaking = false;
+        this._hangover = 0;
+        this._speechFrames = 0;
+        this.onSpeechStart = null;
+        this.onSpeechEnd = null;
+    }
+
+    _rms(pcm) {
+        let sum = 0;
+        for (let i = 0; i < pcm.length; i++) {
+            const norm = pcm[i] / 32768;
+            sum += norm * norm;
+        }
+        return Math.sqrt(sum / pcm.length);
+    }
+
+    feed(pcm) {
+        const rms = this._rms(pcm);
+        this._rmsHistory.push(rms);
+        if (this._rmsHistory.length > 50) this._rmsHistory.shift();
+
+        const isActive = rms > this.threshold;
+
+        if (!this._speaking && isActive) {
+            this._speechFrames++;
+            if (this._speechFrames >= this.minSpeechFrames) {
+                this._speaking = true;
+                this._hangover = 0;
+                if (this.onSpeechStart) this.onSpeechStart();
+            }
+        } else if (this._speaking && !isActive) {
+            this._hangover++;
+            if (this._hangover >= this.hangoverFrames) {
+                this._speaking = false;
+                this._speechFrames = 0;
+                if (this.onSpeechEnd) this.onSpeechEnd();
+            }
+        } else if (!this._speaking && !isActive) {
+            this._speechFrames = 0;
+        }
+
+        return { rms, speaking: this._speaking };
+    }
+
+    reset() {
+        this._speaking = false;
+        this._speechFrames = 0;
+        this._hangover = 0;
+        this._rmsHistory = [];
+    }
+}
+
+// Playback Manager
+class PlaybackManager {
+    constructor() {
+        this.ctx = null;
+        this._queue = [];
+        this._playing = false;
+        this._nextTime = 0;
+        this._gainNode = null;
+    }
+
+    _ensureCtx() {
+        if (!this.ctx) {
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            this._gainNode = this.ctx.createGain();
+            this._gainNode.gain.value = 1.0;
+            this._gainNode.connect(this.ctx.destination);
+        }
+    }
+
+    enqueue(pcm16) {
+        this._ensureCtx();
+        this._queue.push(pcm16);
+        if (!this._playing) this._playNext();
+    }
+
+    _playNext() {
+        if (this._queue.length === 0) { this._playing = false; return; }
+        this._playing = true;
+        const pcm = this._queue.shift();
+        const buf = this.ctx.createBuffer(1, pcm.length, 24000);
+        const ch = buf.getChannelData(0);
+        for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(this._gainNode);
+        src.onended = () => this._playNext();
+        src.start(this._nextTime || 0);
+        this._nextTime = (this._nextTime || 0) + buf.duration;
+    }
+
+    stop() {
+        this._queue = [];
+        this._playing = false;
+        this._nextTime = 0;
+    }
+
+    interrupt() {
+        this.stop();
+        if (this.ctx && this.ctx.state !== 'closed') {
+            this.ctx.close();
+            this.ctx = null;
+            this._gainNode = null;
+        }
+    }
+
+    close() { this.interrupt(); }
+}
+
+// Visualizer
+class Visualizer {
+    constructor(canvasId, labelId) {
+        this.canvas = document.getElementById(canvasId);
+        this.labelEl = document.getElementById(labelId);
+        this.ctx = this.canvas.getContext('2d');
+        this._level = 0;
+        this._label = 'IDLE';
+        this._running = false;
+        this._animId = null;
+    }
+
+    start() {
+        this._running = true;
+        this._resize();
+        this._draw();
+    }
+
+    stop() { this._running = false; if (this._animId) cancelAnimationFrame(this._animId); }
+
+    setLevel(level) { this._level = Math.max(0, Math.min(1, level)); }
+
+    setLabel(label) { this._label = label; if (this.labelEl) this.labelEl.textContent = label; }
+
+    _resize() {
+        const rect = this.canvas.parentElement.getBoundingClientRect();
+        this.canvas.width = rect.width;
+        this.canvas.height = rect.height;
+    }
+
+    _draw() {
+        if (!this._running) return;
+        const w = this.canvas.width, h = this.canvas.height;
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = '#0f0f1e';
+        ctx.fillRect(0, 0, w, h);
+        const barWidth = w - 40;
+        const barHeight = 20;
+        const barX = 20;
+        const barY = h / 2 - barHeight / 2;
+        ctx.fillStyle = '#2a2a4e';
+        ctx.beginPath();
+        ctx.roundRect(barX, barY, barWidth, barHeight, 10);
+        ctx.fill();
+        const fillW = Math.max(2, barWidth * this._level);
+        const hue = this._level < 0.3 ? 200 : this._level < 0.6 ? 140 : 0;
+        ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
+        ctx.beginPath();
+        ctx.roundRect(barX, barY, fillW, barHeight, 10);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        ctx.lineWidth = 1;
+        for (let x = barX; x < barX + barWidth; x += barWidth / 8) {
+            ctx.beginPath(); ctx.moveTo(x, barY); ctx.lineTo(x, barY + barHeight); ctx.stroke();
+        }
+        this._animId = requestAnimationFrame(() => this._draw());
+    }
+}
+
+// Duplex App
+class DuplexApp {
+    constructor() {
+        this.ws = null;
+        this.audio = new AudioManager();
+        this.vad = new VAD({ threshold: 0.025, minSpeechFrames: 5, hangoverFrames: 20 });
+        this.playback = new PlaybackManager();
+        this.vis = new Visualizer('vis-canvas', 'vis-label');
+        this._connected = false;
+        this._sessionStarted = false;
+        this._collecting = false;
+        this._audioBuffer = [];
+        this._sessionId = null;
+        this._voiceNames = [];
+
+        this.vad.onSpeechStart = () => this._onSpeechStart();
+        this.vad.onSpeechEnd = () => this._onSpeechEnd();
+        this.audio.onAudio = (pcm) => this._onAudio(pcm);
+    }
+
+    async loadVoices(wsUrl) {
+        try {
+            const base = wsUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/ws\/.*$/, '');
+            const url = `${base}/voices`;
+            console.log('Fetching voices from:', url);
+            const res = await fetch(url, { mode: 'cors' });
+            console.log('Fetch response:', res.status, res.ok);
+            if (!res.ok) {
+                console.error('Failed to fetch voices:', res.status);
+                return;
+            }
+            const voices = await res.json();
+            console.log('Voices received:', voices);
+            const sel = document.getElementById('voice-select');
+            if (!sel) {
+                console.error('voice-select element not found');
+                return;
+            }
+            sel.innerHTML = '<option value="">— voice design —</option>';
+            for (const v of voices) {
+                const opt = document.createElement('option');
+                opt.value = v.name; opt.textContent = v.name;
+                sel.appendChild(opt);
+            }
+            console.log('Voices loaded:', voices.length);
+        } catch (e) {
+            console.error('Error loading voices:', e);
+        }
+    }
+
+    async connect() {
+        const url = document.getElementById('ws-url').value.trim();
+        if (!url) return;
+
+        this._setStatus('Connecting...', '');
+        try {
+            this.ws = new WebSocket(url);
+        } catch (e) {
+            this._log('system', `Connection failed: ${e.message}`);
+            return;
+        }
+
+        this.ws.onopen = async () => {
+            this._connected = true;
+            this._setStatus('Connected, starting session...', 'connected');
+            document.getElementById('btn-connect').disabled = true;
+            document.getElementById('btn-disconnect').disabled = false;
+            try {
+                await this.audio.start();
+            } catch (e) {
+                this._log('system', `Mic access denied: ${e.message}`);
+            }
+            this._sendSessionStart();
+        };
+
+        this.ws.onclose = () => this._onDisconnect();
+
+        this.ws.onerror = () => this._setStatus('WebSocket error', 'error');
+
+        this.ws.onmessage = (msg) => this._onMessage(msg);
+    }
+
+    disconnect() {
+        if (this.ws) {
+            try { this.ws.close(); } catch (_) {}
+            this.ws = null;
+        }
+        this._onDisconnect();
+    }
+
+    toggleTalk() {
+        if (this._collecting) {
+            this._stopCapture();
+        } else {
+            this._startCapture();
+        }
+    }
+
+    _onDisconnect() {
+        this._connected = false;
+        this._sessionStarted = false;
+        this._collecting = false;
+        this._audioBuffer = [];
+        this.vad.reset();
+        this.audio.stop();
+        this.playback.close();
+        this.vis.setLevel(0);
+        this.vis.setLabel('DISCONNECTED');
+        this._setStatus('Disconnected', 'error');
+        document.getElementById('btn-connect').disabled = false;
+        document.getElementById('btn-disconnect').disabled = true;
+        document.getElementById('btn-talk').disabled = true;
+        document.getElementById('btn-talk').textContent = 'Hold to Talk';
+        document.getElementById('btn-talk').classList.remove('active');
+        document.getElementById('session-info').textContent = '';
+    }
+
+    async _sendSessionStart() {
+        const voice = document.getElementById('voice-select').value || null;
+        const language = document.getElementById('lang-select').value || null;
+        const instruct = document.getElementById('instruct-input').value.trim() || null;
+        this._send({ type: 'session_start', sample: voice, language, instruct, sample_rate: 16000 });
+    }
+
+    _send(data) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(data));
+        }
+    }
+
+    _sendBinary(data) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(data);
+        }
+    }
+
+    async _onMessage(msg) {
+        if (msg.data instanceof ArrayBuffer || msg.data instanceof Blob) {
+            this._onBinary(msg.data);
+            return;
+        }
+
+        let payload;
+        try { payload = JSON.parse(msg.data); } catch { return; }
+
+        const type = payload.type;
+
+        if (type === 'session_started') {
+            this._sessionStarted = true;
+            this._sessionId = payload.sample || 'unknown';
+            this._setStatus(`Session started (voice: ${payload.sample || 'design'})`, 'connected');
+            document.getElementById('btn-talk').disabled = false;
+            document.getElementById('session-info').textContent = `session: ${this._sessionId?.slice(0, 8) || ''}`;
+            this._log('system', `Session started — voice: ${payload.sample || 'design'} ${payload.language ? `language: ${payload.language}` : ''}`);
+        } else if (type === 'listening') {
+            this._setStatus('Listening...', 'listening');
+            this.vis.setLabel('LISTENING');
+            this._log('system', 'Listening...');
+        } else if (type === 'transcript_final') {
+            this.vis.setLabel('TRANSCRIBED');
+            this._log('user', payload.text || '');
+        } else if (type === 'assistant_text') {
+            this._log('assistant', payload.text || '', false);
+        } else if (type === 'audio_chunk') {
+            // Binary follows
+        } else if (type === 'response_done') {
+            this.vis.setLabel('IDLE');
+            this._setStatus('Response complete', 'connected');
+            this._log('system', '— response complete —');
+        } else if (type === 'interrupted') {
+            this.playback.interrupt();
+            this.vis.setLabel('INTERRUPTED');
+            this._setStatus('Interrupted', 'interrupted');
+            this._log('system', '— interrupted —');
+        } else if (type === 'error') {
+            this._log('system', `Error: ${payload.message}`);
+        }
+    }
+
+    _onBinary(data) {
+        const blob = data instanceof Blob ? data : new Blob([data]);
+        blob.arrayBuffer().then(buf => {
+            const pcm = new Int16Array(buf);
+            this.playback.enqueue(pcm);
+            this.vis.setLabel('SPEAKING');
+            this._setStatus('Assistant speaking', 'speaking');
+        });
+    }
+
+    _onAudio(pcm) {
+        const { rms } = this.vad.feed(pcm);
+        this.vis.setLevel(rms * 3);
+
+        if (!this._collecting) return;
+
+        this._audioBuffer.push(pcm);
+        this._sendBinary(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength));
+
+        const totalBytes = this._audioBuffer.reduce((s, c) => s + c.byteLength, 0);
+        if (totalBytes > 960 * 1024) {
+            this._stopCapture();
+        }
+    }
+
+    _onSpeechStart() { this._startCapture(); }
+
+    _onSpeechEnd() { this._stopCapture(); }
+
+    async _startCapture() {
+        if (this._collecting || !this._sessionStarted) return;
+        this._collecting = true;
+        this._audioBuffer = [];
+        this.vad.reset();
+        this._send({ type: 'speech_start' });
+        document.getElementById('btn-talk').textContent = 'Release to Stop';
+        document.getElementById('btn-talk').classList.add('active');
+        this.vis.setLabel('LISTENING');
+    }
+
+    _stopCapture() {
+        if (!this._collecting) return;
+        this._collecting = false;
+        this.vad.reset();
+        this._send({ type: 'speech_end' });
+        document.getElementById('btn-talk').textContent = 'Hold to Talk';
+        document.getElementById('btn-talk').classList.remove('active');
+        this.vis.setLabel('PROCESSING');
+    }
+
+    _setStatus(text, state) {
+        const dot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        statusText.textContent = text;
+        ['connected', 'error', 'listening', 'speaking', 'interrupted'].forEach(c => dot.classList.remove(c));
+        if (state) dot.classList.add(state);
+    }
+
+    _log(type, text) {
+        const log = document.getElementById('conversation-log');
+        const entry = document.createElement('div');
+        entry.className = 'log-entry ' + type;
+        const labels = { user: 'You', assistant: 'Assistant', system: 'System' };
+        entry.innerHTML = `<div class="log-label ${type}">${labels[type] || type}</div><div>${text}</div>`;
+        log.appendChild(entry);
+        log.scrollTop = log.scrollHeight;
+    }
+}
+
+// Initialize
+const duplexApp = new DuplexApp();
+duplexApp.vis.start();
+
+// Auto-detect WS URL and load voices
+const wsUrl = document.getElementById('ws-url');
+const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+wsUrl.value = `${wsProtocol}//${window.location.host}/ws/conversation`;
+duplexApp.loadVoices(wsUrl.value);
+
+// Button handlers
+document.getElementById('btn-connect').addEventListener('click', () => duplexApp.connect());
+document.getElementById('btn-disconnect').addEventListener('click', () => duplexApp.disconnect());
+document.getElementById('btn-talk').addEventListener('click', () => duplexApp.toggleTalk());
+    </script>
+</body>
+</html>
